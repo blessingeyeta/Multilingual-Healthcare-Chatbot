@@ -1,4 +1,16 @@
+import os
 import streamlit as st
+from dotenv import load_dotenv
+from llm import ask_llm
+from knowledge_base import KNOWLEDGE
+
+# Load .env for local dev; fall back to st.secrets on Streamlit Cloud
+load_dotenv()
+if not os.getenv("GROQ_API_KEY"):
+    try:
+        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        pass
 
 # --------------------------------------------------
 # Page setup
@@ -61,9 +73,9 @@ st.markdown(
         font-weight: 600;
     }
     .framework-box {
-        background-color: #f8fafc;
-        color: #0f172a;
-        border: 1px solid #e2e8f0;
+        background-color: rgba(255, 255, 255, 0.06);
+        color: #e2e8f0;
+        border: 1px solid rgba(255, 255, 255, 0.12);
         padding: 12px;
         border-radius: 10px;
         margin-bottom: 8px;
@@ -334,8 +346,8 @@ def get_final_response(intent, duration, severity, extra_details):
     if intent == "Emergency":
         return {
             "response": emergency_response[lang],
-            "source": "Source: Standard emergency triage guidance. Full implementation would map emergency symptoms to verified clinical triage protocols.",
-            "next": "Next step: Seek urgent medical attention immediately."
+            "source": KNOWLEDGE["Emergency"]["source_note"],
+            "next": KNOWLEDGE["Emergency"]["next_step"],
         }
 
     response = responses[intent][lang]
@@ -360,13 +372,32 @@ def get_final_response(intent, duration, severity, extra_details):
     if extra_details:
         context_notes.append(f"Additional details provided: {extra_details}.")
 
+    # Try LLM; fall back to hardcoded response if unavailable
+    llm_response = ask_llm(
+        intent=intent,
+        language=lang,
+        age=age,
+        sex=sex,
+        user_message=st.session_state.get("pending_question", ""),
+        duration=duration,
+        severity=severity,
+        extra=extra_details,
+    )
+
+    if llm_response:
+        return {
+            "response": llm_response,
+            "source": KNOWLEDGE[intent]["source_note"],
+            "next": KNOWLEDGE[intent]["next_step"],
+        }
+
     if context_notes:
         response += "\n\nContext-aware note: " + " ".join(context_notes)
 
     return {
         "response": response,
-        "source": responses[intent]["source"],
-        "next": responses[intent]["next"]
+        "source": KNOWLEDGE[intent]["source_note"],
+        "next": KNOWLEDGE[intent]["next_step"],
     }
 
 
@@ -399,6 +430,14 @@ with st.sidebar:
 # --------------------------------------------------
 st.markdown('<div class="title">🩺 AI-Powered Multilingual Healthcare Chatbot</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">Proof-of-Concept implementation for Nigerian multilingual healthcare communication</div>', unsafe_allow_html=True)
+
+if st.session_state.language:
+    st.markdown(
+        f'<div style="display:inline-block;background:#0f766e;color:white;'
+        f'padding:4px 14px;border-radius:20px;font-size:13px;margin-bottom:12px;">'
+        f'🌐 {st.session_state.language}</div>',
+        unsafe_allow_html=True,
+    )
 
 st.markdown(
     """
@@ -474,31 +513,24 @@ else:
             submitted = st.form_submit_button(t("submit_followup"))
 
             if submitted:
-                final = get_final_response(
-                    st.session_state.pending_intent,
-                    duration,
-                    severity,
-                    extra
-                )
+                with st.spinner("Getting guidance..."):
+                    final = get_final_response(
+                        st.session_state.pending_intent,
+                        duration,
+                        severity,
+                        extra
+                    )
 
+                source_text = final["source"].removeprefix("Source: ")
+                next_text = final["next"].removeprefix("Next step: ")
                 st.session_state.messages.append(
                     {
                         "role": "assistant",
-                        "content": final["response"]
-                    }
-                )
-
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": f"{t('source')}: {final['source']}"
-                    }
-                )
-
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": f"{t('next_step')}: {final['next']}"
+                        "content": (
+                            f"{final['response']}\n\n"
+                            f"**{t('source')}:** {source_text}\n\n"
+                            f"**{t('next_step')}:** {next_text}"
+                        ),
                     }
                 )
 
@@ -519,9 +551,16 @@ else:
             # Emergency should respond immediately
             if intent == "Emergency":
                 final = get_final_response(intent, "", "", "")
-                st.session_state.messages.append({"role": "assistant", "content": final["response"]})
-                st.session_state.messages.append({"role": "assistant", "content": f"{t('source')}: {final['source']}"})
-                st.session_state.messages.append({"role": "assistant", "content": f"{t('next_step')}: {final['next']}"})
+                source_text = final["source"].removeprefix("Source: ")
+                next_text = final["next"].removeprefix("Next step: ")
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": (
+                        f"{final['response']}\n\n"
+                        f"**{t('source')}:** {source_text}\n\n"
+                        f"**{t('next_step')}:** {next_text}"
+                    ),
+                })
                 st.rerun()
 
             # Non-emergency asks follow-up first
